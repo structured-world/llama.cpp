@@ -64,5 +64,8 @@ void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     const int64_t n_elements = ggml_nelements(src0);
     const int64_t n_groups = n_elements / 128;
 
+    fprintf(stderr, "[TURBO_WHT] dir=%d n_elements=%lld n_groups=%lld src=%p dst=%p\n",
+            direction, (long long)n_elements, (long long)n_groups, (void*)src_d, (void*)dst_d);
+
     k_turbo_wht<<<(int)n_groups, 128, 0, stream>>>(src_d, dst_d, n_elements, direction);
 }
