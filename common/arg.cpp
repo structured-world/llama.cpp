@@ -389,6 +389,11 @@ static handle_model_result common_params_handle_model(struct common_params_model
 }
 
 const std::vector<ggml_type> kv_cache_types = {
+    GGML_TYPE_TURBO4_0,
+    GGML_TYPE_TURBO3_0,
+    GGML_TYPE_TURBO2_0,
+    GGML_TYPE_TURBO3_TCQ,
+    GGML_TYPE_TURBO2_TCQ,
     GGML_TYPE_F32,
     GGML_TYPE_F16,
     GGML_TYPE_BF16,

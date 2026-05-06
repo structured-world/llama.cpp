@@ -209,6 +209,133 @@ static void set_rows_cuda(
     }
 }
 
+
+// ── TurboQuant SET_ROWS device quantizers ────────────────────────────────
+// K/V values are stored RAW (no FWHT rotation) — rotation is applied during
+// read inside the FA kernels (k_turbo*_dequant_f16_inv_fwht in fattn.cu).
+// SET_ROWS quantizes float32 → turbo block format without any rotation.
+
+static __constant__ float d_turbo_centroids_2bit_sr[4] = {
+    -0.133462f, -0.039994f, 0.039994f, 0.133462f
+};
+static __constant__ float d_turbo_centroids_3bit_sr[8] = {
+    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+     0.021460f,  0.065717f,  0.117832f,  0.190685f
+};
+static __constant__ float d_turbo_centroids_4bit_sr[16] = {
+    -0.241556f, -0.182907f, -0.143047f, -0.111065f,
+    -0.083317f, -0.058069f, -0.034311f, -0.011353f,
+     0.011353f,  0.034311f,  0.058069f,  0.083317f,
+     0.111065f,  0.143047f,  0.182907f,  0.241556f,
+};
+
+// turbo2_0: 32 elements/block, 4-centroid 2-bit, 4 indices/byte
+static __device__ void quantize_f32_turbo2_0_block(const float * src, block_turbo2_0 * dst) {
+    constexpr int QK = QK_TURBO2;  // 32
+    float norm_sq = 0.0f;
+    for (int i = 0; i < QK; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    float inv  = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+
+    uint8_t indices[QK];
+    for (int i = 0; i < QK; i++) {
+        float val = src[i] * inv;
+        int best = 0;
+        float best_d = fabsf(val - d_turbo_centroids_2bit_sr[0]);
+        for (int c = 1; c < 4; c++) {
+            float d = fabsf(val - d_turbo_centroids_2bit_sr[c]);
+            if (d < best_d) { best_d = d; best = c; }
+        }
+        indices[i] = (uint8_t)best;
+    }
+
+    float recon_sq = 0.0f;
+    for (int i = 0; i < QK; i++) {
+        float r = d_turbo_centroids_2bit_sr[indices[i]];
+        recon_sq += r * r;
+    }
+    float recon_norm = sqrtf(recon_sq);
+    dst->norm = __float2half((recon_norm > 1e-10f) ? (norm / recon_norm) : norm);
+
+    // Pack 4 × 2-bit per byte
+    for (int i = 0; i < QK; i += 4) {
+        dst->qs[i / 4] = (uint8_t)(indices[i] | (indices[i+1]<<2) | (indices[i+2]<<4) | (indices[i+3]<<6));
+    }
+}
+
+// turbo3_0: 32 elements/block, 8-centroid 3-bit, lower 2 bits in qs, upper 1 in signs
+static __device__ void quantize_f32_turbo3_0_block(const float * src, block_turbo3_0 * dst) {
+    constexpr int QK = QK_TURBO3;  // 32
+    float norm_sq = 0.0f;
+    for (int i = 0; i < QK; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    float inv  = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+
+    uint8_t indices[QK];
+    for (int i = 0; i < QK; i++) {
+        float val = src[i] * inv;
+        int best = 0;
+        float best_d = fabsf(val - d_turbo_centroids_3bit_sr[0]);
+        for (int c = 1; c < 8; c++) {
+            float d = fabsf(val - d_turbo_centroids_3bit_sr[c]);
+            if (d < best_d) { best_d = d; best = c; }
+        }
+        indices[i] = (uint8_t)best;
+    }
+
+    float recon_sq = 0.0f;
+    for (int i = 0; i < QK; i++) {
+        float r = d_turbo_centroids_3bit_sr[indices[i]];
+        recon_sq += r * r;
+    }
+    float recon_norm = sqrtf(recon_sq);
+    dst->norm = __float2half((recon_norm > 1e-10f) ? (norm / recon_norm) : norm);
+
+    // Lower 2 bits into qs (4 per byte), upper 1 bit into signs (8 per byte)
+    for (int i = 0; i < QK; i += 4) {
+        dst->qs[i / 4] = (uint8_t)((indices[i]&3) | ((indices[i+1]&3)<<2) | ((indices[i+2]&3)<<4) | ((indices[i+3]&3)<<6));
+    }
+    for (int i = 0; i < QK; i += 8) {
+        uint8_t s = 0;
+        for (int j = 0; j < 8; j++) s |= ((indices[i+j] >> 2) & 1) << j;
+        dst->signs[i / 8] = s;
+    }
+}
+
+// turbo4_0: 128 elements/block, 16-centroid 4-bit, 2 per byte (low nibble first)
+static __device__ void quantize_f32_turbo4_0_block(const float * src, block_turbo4_0 * dst) {
+    constexpr int QK = QK_TURBO4;  // 128
+    float norm_sq = 0.0f;
+    for (int i = 0; i < QK; i++) norm_sq += src[i] * src[i];
+    float norm = sqrtf(norm_sq);
+    float inv  = (norm > 1e-10f) ? (1.0f / norm) : 0.0f;
+
+    uint8_t indices[QK];
+    for (int i = 0; i < QK; i++) {
+        float val = src[i] * inv;
+        int best = 0;
+        float best_d = fabsf(val - d_turbo_centroids_4bit_sr[0]);
+        for (int c = 1; c < 16; c++) {
+            float d = fabsf(val - d_turbo_centroids_4bit_sr[c]);
+            if (d < best_d) { best_d = d; best = c; }
+        }
+        indices[i] = (uint8_t)best;
+    }
+
+    float recon_sq = 0.0f;
+    for (int i = 0; i < QK; i++) {
+        float r = d_turbo_centroids_4bit_sr[indices[i]];
+        recon_sq += r * r;
+    }
+    float recon_norm = sqrtf(recon_sq);
+    dst->norm = __float2half((recon_norm > 1e-10f) ? (norm / recon_norm) : norm);
+
+    // Pack: low nibble = even index, high nibble = odd index
+    for (int i = 0; i < QK; i += 2) {
+        dst->qs[i / 2] = (uint8_t)((indices[i+1] << 4) | (indices[i] & 0xF));
+    }
+}
+
 template<typename src_t, typename idx_t>
 static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const src_t * src0_d = (const src_t *)src0->data;
@@ -302,6 +429,36 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     } else if (dst->type == GGML_TYPE_IQ4_NL) {
         set_rows_cuda_quant<idx_t, block_iq4_nl, QK4_NL, quantize_f32_iq4_nl_block>(
             src0_d, src1_d, (block_iq4_nl*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO2_0) {
+        set_rows_cuda_quant<idx_t, block_turbo2_0, QK_TURBO2, quantize_f32_turbo2_0_block>(
+            src0_d, src1_d, (block_turbo2_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO3_0) {
+        set_rows_cuda_quant<idx_t, block_turbo3_0, QK_TURBO3, quantize_f32_turbo3_0_block>(
+            src0_d, src1_d, (block_turbo3_0*)dst->data,
+            ne00, ne01, ne02, ne03,
+            ne10, ne11, ne12, ne13,
+            nb01, nb02, nb03,
+            nb10, nb11, nb12,
+            nb1, nb2, nb3,
+            stream
+        );
+    } else if (dst->type == GGML_TYPE_TURBO4_0) {
+        set_rows_cuda_quant<idx_t, block_turbo4_0, QK_TURBO4, quantize_f32_turbo4_0_block>(
+            src0_d, src1_d, (block_turbo4_0*)dst->data,
             ne00, ne01, ne02, ne03,
             ne10, ne11, ne12, ne13,
             nb01, nb02, nb03,
