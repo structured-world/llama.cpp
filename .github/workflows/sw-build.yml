@@ -12,6 +12,7 @@ concurrency:
 env:
   BUILD_DIR: /home/gpu/llama-build
   CCACHE_DIR: /home/gpu/.ccache
+  PATH: /usr/local/cuda-13.2/bin:/home/gpu/.cargo/bin:/home/gpu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 jobs:
   build:
