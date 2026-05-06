@@ -47,6 +47,14 @@ static __global__ void k_turbo_wht(
     if (threadIdx.x < 128) {
         dst[offset + threadIdx.x] = buf[threadIdx.x] * inv_sqrt_128 * s_second[threadIdx.x];
     }
+
+    // Debug: print first group's first 8 input and output values
+    if (blockIdx.x == 0 && threadIdx.x < 8) {
+        printf("[WHT-DBG] grp=0 tid=%d src=%.4f dst=%.4f\n",
+               threadIdx.x,
+               src[threadIdx.x],
+               dst[threadIdx.x]);
+    }
 }
 
 void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
