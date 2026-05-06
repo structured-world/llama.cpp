@@ -1,0 +1,49 @@
+name: SW Build & Deploy
+
+on:
+  push:
+    branches: [sw-main]
+  workflow_dispatch:
+
+concurrency:
+  group: sw-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_DIR: /home/gpu/llama-build
+  CCACHE_DIR: /home/gpu/.ccache
+
+jobs:
+  build:
+    runs-on: [self-hosted, gpu-private-systems]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Configure (CUDA + ccache)
+        run: |
+          cmake -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86 \
+            -DGGML_CUDA_FA_ALL_QUANTS=ON \
+            -DLLAMA_NATIVE=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=ON
+
+      - name: Build llama-server
+        run: cmake --build "$BUILD_DIR" --target llama-server -j$(nproc)
+
+      - name: Deploy
+        if: github.ref == 'refs/heads/sw-main' && github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          install -m 755 "$BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
+          systemctl --user restart cxbr-gpu-svc.service
+          echo "✓ Deployed llama-server-turbo and restarted cxbr-gpu-svc"
