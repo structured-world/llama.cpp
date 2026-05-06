@@ -270,6 +270,20 @@ static __device__ __forceinline__ uint8_t tsr_nearest_2bit(float v) {
     else                             return 3;
 }
 
+static __constant__ float d_turbo_centroids_2bit_sr[4] = {
+    -0.133462f, -0.039994f, 0.039994f, 0.133462f
+};
+static __constant__ float d_turbo_centroids_3bit_sr[8] = {
+    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
+     0.021460f,  0.065717f,  0.117832f,  0.190685f
+};
+static __constant__ float d_turbo_centroids_4bit_sr[16] = {
+    -0.241556f, -0.182907f, -0.143047f, -0.111065f,
+    -0.083317f, -0.058069f, -0.034311f, -0.011353f,
+     0.011353f,  0.034311f,  0.058069f,  0.083317f,
+     0.111065f,  0.143047f,  0.182907f,  0.241556f,
+};
+
 // ── Turbo3 SET_ROWS kernel with FWHT (one thread per 128-element group) ───
 template<typename idx_t>
 static __global__ void k_turbo3_sr(
@@ -407,20 +421,6 @@ static void turbo_sr_fwht_dispatch(
         s01, s02, s03, s10, s11, s12, s1, s2, s3,
         ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
 }
-
-static __constant__ float d_turbo_centroids_2bit_sr[4] = {
-    -0.133462f, -0.039994f, 0.039994f, 0.133462f
-};
-static __constant__ float d_turbo_centroids_3bit_sr[8] = {
-    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-     0.021460f,  0.065717f,  0.117832f,  0.190685f
-};
-static __constant__ float d_turbo_centroids_4bit_sr[16] = {
-    -0.241556f, -0.182907f, -0.143047f, -0.111065f,
-    -0.083317f, -0.058069f, -0.034311f, -0.011353f,
-     0.011353f,  0.034311f,  0.058069f,  0.083317f,
-     0.111065f,  0.143047f,  0.182907f,  0.241556f,
-};
 
 // turbo2_0: 32 elements/block, 4-centroid 2-bit, 4 indices/byte
 static __device__ void quantize_f32_turbo2_0_block(const float * src, block_turbo2_0 * dst) {
