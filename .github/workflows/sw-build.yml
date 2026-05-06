@@ -46,7 +46,7 @@ jobs:
         run: cmake --build "$BUILD_DIR" --target llama-server -j$(nproc)
 
       - name: Deploy
-        if: github.ref == 'refs/heads/sw-main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/sw-main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           set -euo pipefail
           install -m 755 "$BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
