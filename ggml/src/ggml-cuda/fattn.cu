@@ -1637,8 +1637,10 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 const bool k_t2_use_rotated = (K->type == GGML_TYPE_TURBO2_0) &&
                     (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
                      V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16);
-                const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0) &&
-                    (V->type == GGML_TYPE_TURBO2_0);
+                // Bug #32: K=turbo3 inv-FWHT decode fails for all V types (same symptom as
+                // Bug #31 for K=turbo2). Use rotated-domain dequant (K stays in FWHT space,
+                // Q is pre-rotated) for ALL V types — this is the only working decode path.
+                const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0);
                 dim3 grid_k(K->ne[1], K->ne[2], K->ne[3]);
                 if (K->type == GGML_TYPE_TURBO2_0 && k_t2_use_rotated) {
                     // Rotated-domain dequant: K stays in WHT-rotated space; Q is pre-rotated below.
@@ -1738,13 +1740,13 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         ggml_tensor Q_rot_decode;
         ggml_tensor * orig_q_decode = nullptr;
         const bool turbo_k_any = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ);
-        // Bug #31 exception: when K=turbo2/turbo3 dequant fell back to the rotated kernel (see K
+        // Bug #31/#32 exception: when K=turbo2/turbo3 dequant used the rotated kernel (see K
         // dispatch above), K is in WHT-rotated space, not original space, so Q must be pre-rotated.
         const bool k_uses_rotated_path = do_decode_dequant && (
             ((K->type == GGML_TYPE_TURBO2_0) &&
              (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
               V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16)) ||
-            ((K->type == GGML_TYPE_TURBO3_0) && (V->type == GGML_TYPE_TURBO2_0)));
+            (K->type == GGML_TYPE_TURBO3_0));  // Bug #32: turbo3 always uses rotated path
         const bool turbo_k_in_orig_domain = do_decode_dequant && turbo_k_any && !k_uses_rotated_path;
         if (turbo_k_any && !turbo_k_in_orig_domain && Q->ne[0] % 128 == 0) {
             const size_t q_size = ggml_nelements(Q) * sizeof(float);
