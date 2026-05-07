@@ -341,6 +341,8 @@ static ggml_cuda_device_info ggml_cuda_init() {
         }
     }
 
+    turbo_innerq_init_fattn();
+
     return info;
 }
 
