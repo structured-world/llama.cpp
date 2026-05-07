@@ -1608,6 +1608,14 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         if (do_decode_dequant) {
             const bool k_needs_dequant = turbo_k_only || (K->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
             const bool v_needs_dequant = turbo_v_only || (V->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
+            // Debug: log K/V shapes when K=turbo3 and D>128 (Gemma4 path)
+            static std::atomic<int> debug_log_count{0};
+            if (K->type == GGML_TYPE_TURBO3_0 && K->ne[0] > 128 && debug_log_count.fetch_add(1) < 4) {
+                fprintf(stderr, "[fattn-debug] K ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu] V type=%d Q ne0=%ld k_needs=%d v_needs=%d\n",
+                    K->ne[0], K->ne[1], K->ne[2], K->ne[3],
+                    K->nb[0], K->nb[1], K->nb[2], K->nb[3],
+                    (int)V->type, Q->ne[0], (int)k_needs_dequant, (int)v_needs_dequant);
+            }
             if (k_needs_dequant) {
                 // Size the dequant buffer for the FULL cache (kv_size from the underlying root
                 // tensor), not just the current n_kv. This prevents per-token reallocations as
