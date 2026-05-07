@@ -1637,10 +1637,11 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 const bool k_t2_use_rotated = (K->type == GGML_TYPE_TURBO2_0) &&
                     (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
                      V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16);
-                // Bug #32: K=turbo3 inv-FWHT decode fails for all V types (same symptom as
-                // Bug #31 for K=turbo2). Use rotated-domain dequant (K stays in FWHT space,
-                // Q is pre-rotated) for ALL V types — this is the only working decode path.
-                const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0);
+                // Bug #32: K=turbo3 inv-FWHT decode fails for D=128 (diagnosed on Qwen3-9B,
+                // n_head_kv=8). Use rotated-domain dequant for that case (K stays in FWHT space,
+                // Q is pre-rotated). For D=256+ (Gemma4 ISWA, n_head_kv=2) the inv-FWHT path
+                // works correctly; the rotated path produces garbage on those models.
+                const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0) && (K->ne[0] <= 128);
                 dim3 grid_k(K->ne[1], K->ne[2], K->ne[3]);
                 if (K->type == GGML_TYPE_TURBO2_0 && k_t2_use_rotated) {
                     // Rotated-domain dequant: K stays in WHT-rotated space; Q is pre-rotated below.
@@ -1650,7 +1651,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                     k_turbo2_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
                         (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
                 } else if (K->type == GGML_TYPE_TURBO3_0 && k_t3_use_rotated) {
-                    // Rotated-domain dequant for K=t3 + V=t2 (same Bug #31 pattern, V side).
+                    // Rotated-domain dequant for D=128 K=turbo3 (Bug #32 workaround).
                     k_turbo3_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
                         (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
                 } else if (K->type == GGML_TYPE_TURBO3_0) {
@@ -1746,7 +1747,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             ((K->type == GGML_TYPE_TURBO2_0) &&
              (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
               V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16)) ||
-            (K->type == GGML_TYPE_TURBO3_0));  // Bug #32: turbo3 always uses rotated path
+            (K->type == GGML_TYPE_TURBO3_0 && K->ne[0] <= 128));  // Bug #32: turbo3 rotated path only for D=128
         const bool turbo_k_in_orig_domain = do_decode_dequant && turbo_k_any && !k_uses_rotated_path;
         if (turbo_k_any && !turbo_k_in_orig_domain && Q->ne[0] % 128 == 0) {
             const size_t q_size = ggml_nelements(Q) * sizeof(float);
