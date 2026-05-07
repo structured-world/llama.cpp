@@ -1598,26 +1598,12 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
 
         half * k_fp16_dec = nullptr;
         half * v_fp16_dec = nullptr;
-        ggml_tensor K_f16_dec, V_f16_dec;
+        ggml_tensor K_f16_dec, V_f16_dec, V_reinterp;
         ggml_tensor * orig_k_decode = nullptr;
         ggml_tensor * orig_v_decode = nullptr;
 
         int device_dec;
         CUDA_CHECK(cudaGetDevice(&device_dec));
-
-        // Debug: log ALL FA calls with K=turbo3 (inside or outside do_decode_dequant)
-        {
-            static std::atomic<int> debug_all_count{0};
-            if (K->type == GGML_TYPE_TURBO3_0 && debug_all_count.fetch_add(1) < 8) {
-                const ggml_tensor * k_root = K;
-                while (k_root->view_src) k_root = k_root->view_src;
-                fprintf(stderr, "[fattn-all] K ne=[%ld,%ld,%ld,%ld] nb=[%zu,%zu,%zu,%zu] Q ne0=%ld V type=%d do_dequant=%d root ne=[%ld,%ld,%ld,%ld]\n",
-                    K->ne[0], K->ne[1], K->ne[2], K->ne[3],
-                    K->nb[0], K->nb[1], K->nb[2], K->nb[3],
-                    Q->ne[0], (int)V->type, (int)do_decode_dequant,
-                    k_root->ne[0], k_root->ne[1], k_root->ne[2], k_root->ne[3]);
-            }
-        }
 
         if (do_decode_dequant) {
             const bool k_needs_dequant = turbo_k_only || (K->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
@@ -1744,6 +1730,24 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 // dispatcher → stale strides → <unused49> garbage. signal_fence is a pure
                 // host-compiler barrier (zero machine instructions).
                 std::atomic_signal_fence(std::memory_order_seq_cst);
+            }
+
+            // Bug: native f16 V from !v_trans KV cache has head-inner layout:
+            //   ne=[head_dim, n_head_kv, n_kv, ns], nb[1]=head_stride, nb[2]=token_stride
+            // K_f16_dec has token-inner layout:
+            //   ne=[head_dim, n_kv, n_head_kv, ns], nb[1]=token_stride, nb[2]=head_stride
+            // VEC kernel reads nb21 as token stride and nb22 as head stride, so passing
+            // V with nb[1]=head_stride produces garbage. Physical data layout is identical —
+            // only the ne[1]↔ne[2] / nb[1]↔nb[2] labeling differs.
+            if (k_needs_dequant && !v_needs_dequant && V->type == GGML_TYPE_F16 &&
+                    V->ne[1] != K_f16_dec.ne[1]) {
+                V_reinterp      = *V;
+                V_reinterp.ne[1] = V->ne[2];
+                V_reinterp.ne[2] = V->ne[1];
+                V_reinterp.nb[1] = V->nb[2];
+                V_reinterp.nb[2] = V->nb[1];
+                orig_v_decode   = dst->src[2];
+                dst->src[2]     = &V_reinterp;
             }
         }
 
