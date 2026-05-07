@@ -1732,22 +1732,31 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 std::atomic_signal_fence(std::memory_order_seq_cst);
             }
 
-            // Bug: native f16 V from !v_trans KV cache has head-inner layout:
-            //   ne=[head_dim, n_head_kv, n_kv, ns], nb[1]=head_stride, nb[2]=token_stride
-            // K_f16_dec has token-inner layout:
-            //   ne=[head_dim, n_kv, n_head_kv, ns], nb[1]=token_stride, nb[2]=head_stride
-            // VEC kernel reads nb21 as token stride and nb22 as head stride, so passing
-            // V with nb[1]=head_stride produces garbage. Physical data layout is identical —
-            // only the ne[1]↔ne[2] / nb[1]↔nb[2] labeling differs.
-            if (k_needs_dequant && !v_needs_dequant && V->type == GGML_TYPE_F16 &&
-                    V->ne[1] != K_f16_dec.ne[1]) {
-                V_reinterp      = *V;
-                V_reinterp.ne[1] = V->ne[2];
-                V_reinterp.ne[2] = V->ne[1];
-                V_reinterp.nb[1] = V->nb[2];
-                V_reinterp.nb[2] = V->nb[1];
-                orig_v_decode   = dst->src[2];
-                dst->src[2]     = &V_reinterp;
+            // Mixed case: K dequanted to a fresh kv_dequant_k_buf but V is native F16 from
+            // the KV cache. Copy V into the same kv_dequant_v_buf path used for turbo V so
+            // the FA kernel always reads both K and V from the same class of allocation.
+            // Without this copy, V is read directly from the KV cache view (a shared buffer
+            // with non-trivial view_offs), while K is read from a fresh cudaMalloc buffer.
+            // The physical data layout and strides are identical, but empirically this produces
+            // garbage output (degenerate "of of of..." repetition on Gemma4 ISWA global layers).
+            if (k_needs_dequant && !v_needs_dequant && V->type == GGML_TYPE_F16) {
+                const ggml_tensor * v_root = V;
+                while (v_root->view_src) v_root = v_root->view_src;
+                const size_t v_max_bytes = (size_t)v_root->ne[0] * v_root->ne[1] * v_root->ne[2] * sizeof(half);
+                if (v_max_bytes > kv_dequant_v_buf_size[device_dec]) {
+                    if (kv_dequant_v_buf[device_dec]) CUDA_CHECK(cudaFree(kv_dequant_v_buf[device_dec]));
+                    CUDA_CHECK(cudaMalloc(&kv_dequant_v_buf[device_dec], v_max_bytes));
+                    kv_dequant_v_buf_size[device_dec] = v_max_bytes;
+                }
+                // V after permute(0,2,1,3): ne=[head_dim, n_kv_cur, n_head_kv],
+                // nb=[2, n_head_kv*head_dim*2, head_dim*2] — physically TKHE-contiguous.
+                const size_t v_cur_bytes = (size_t)V->ne[0] * V->ne[1] * V->ne[2] * sizeof(half);
+                CUDA_CHECK(cudaMemcpyAsync(kv_dequant_v_buf[device_dec], V->data, v_cur_bytes,
+                                           cudaMemcpyDeviceToDevice, stream));
+                V_f16_dec = *V;
+                V_f16_dec.data = kv_dequant_v_buf[device_dec];
+                orig_v_decode = dst->src[2];
+                dst->src[2]   = &V_f16_dec;
             }
         }
 
