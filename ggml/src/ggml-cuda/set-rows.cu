@@ -106,6 +106,11 @@ static void set_rows_cuda_quant(
         k_set_rows_quant<idx_t, block_type, qk, quantize_func><<<grid_size, block_size, 0, stream>>>(
             src0_d, src1_d, dst_d, ne_total, ne10, ne11, ne12, ne13, s01, s02, s03, s10, s11, s12, s1, s2, s3, ne00_fd,
             ne01_fd, ne02_fd, ne11_fd, ne12_fd);
+        // Async kernel launch errors (invalid grid/block, OOM,
+        // template instantiation glitches) silently corrupt the
+        // CUDA context if not checked here. Subsequent stream sync
+        // waits forever — that's the GPU-lockup class we're hunting.
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -206,6 +211,7 @@ static void set_rows_cuda(
         k_set_rows<<<grid_size, block_size, 0, stream>>>(src0_d, src1_d, dst_d, ne_total, ne10, ne11, ne12, ne13, s01,
                                                          s02, s03, s10, s11, s12, s1, s2, s3, ne00_fd, ne01_fd, ne02_fd,
                                                          ne11_fd, ne12_fd);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -420,6 +426,10 @@ static void turbo_sr_fwht_dispatch(
         ne00, ne01, ne02, ne10, ne11, ne12, ne13,
         s01, s02, s03, s10, s11, s12, s1, s2, s3,
         ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
+    // Async kernel launch error check — see top of file. Without this
+    // a stride mismatch / OOB index from the turbo SET_ROWS path
+    // (T_NN-S_K case mostly) silently corrupts the CUDA context.
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // turbo2_0: 32 elements/block, 4-centroid 2-bit, 4 indices/byte
