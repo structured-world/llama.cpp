@@ -11,6 +11,7 @@ concurrency:
 
 env:
   BUILD_DIR: /home/gpu/llama-build
+  DEBUG_BUILD_DIR: /home/gpu/llama-build-debug
   CCACHE_DIR: /home/gpu/.ccache
   PATH: /usr/local/cuda-13.2/bin:/home/gpu/.cargo/bin:/home/gpu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -24,7 +25,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Configure (CUDA + ccache)
+      - name: Configure (CUDA + ccache) — release
         run: |
           rm -f "$BUILD_DIR/CMakeCache.txt"
           cmake -B "$BUILD_DIR" \
@@ -42,13 +43,42 @@ jobs:
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=ON
 
-      - name: Build llama-server
+      - name: Build llama-server (release)
         run: cmake --build "$BUILD_DIR" --target llama-server -j$(nproc)
+
+      - name: Configure (CUDA + ccache) — debug for compute-sanitizer
+        run: |
+          rm -f "$DEBUG_BUILD_DIR/CMakeCache.txt"
+          # -G + -lineinfo gives nvcc the device-debug symbols
+          # compute-sanitizer needs to attribute OOB reads to source lines.
+          # Host code still gets -O0 -g for clean stack traces.
+          cmake -B "$DEBUG_BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=/usr/bin/gcc-15 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/g++-15 \
+            -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-15 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_FLAGS="-G -lineinfo" \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=86 \
+            -DGGML_CUDA_FA_ALL_QUANTS=ON \
+            -DLLAMA_NATIVE=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=ON
+
+      - name: Build llama-server (debug)
+        run: cmake --build "$DEBUG_BUILD_DIR" --target llama-server -j$(nproc)
 
       - name: Deploy
         if: github.ref == 'refs/heads/sw-main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           set -euo pipefail
           install -m 755 "$BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
+          install -m 755 "$DEBUG_BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo-debug
           systemctl --user restart cxbr-gpu-svc.service
-          echo "✓ Deployed llama-server-turbo and restarted cxbr-gpu-svc"
+          echo "✓ Deployed llama-server-turbo (release) + llama-server-turbo-debug"
+          echo "  Run with sanitizer: /usr/local/cuda-13.2/bin/compute-sanitizer \\"
+          echo "    --tool memcheck --launch-timeout 60 \\"
+          echo "    /opt/llama-native/llama-server-turbo-debug <args>"
