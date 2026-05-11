@@ -49,9 +49,19 @@ jobs:
       - name: Configure (CUDA + ccache) — debug for compute-sanitizer
         run: |
           rm -f "$DEBUG_BUILD_DIR/CMakeCache.txt"
-          # -G + -lineinfo gives nvcc the device-debug symbols
-          # compute-sanitizer needs to attribute OOB reads to source lines.
-          # Host code still gets -O0 -g for clean stack traces.
+          # `-lineinfo` ONLY — gives compute-sanitizer full source-line
+          # attribution for OOB / race detection WITHOUT inflating
+          # per-thread register usage. We deliberately do NOT add `-G`:
+          # `-G` disables device-side optimizations, which on sm_86
+          # (RTX 3070) explodes the register footprint of our turbo
+          # fattn / MUL_MAT kernels and triggers
+          # cudaErrorLaunchOutOfResources ("too many resources
+          # requested for launch") on warmup, making the binary
+          # unusable. With `-lineinfo` alone the debug build stays
+          # production-runnable AND compute-sanitizer still resolves
+          # symbols to source lines.
+          # Host code keeps -O0 -g (Debug build type) for clean stack
+          # traces on ABORT.
           cmake -B "$DEBUG_BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=/usr/bin/gcc-15 \
@@ -59,7 +69,7 @@ jobs:
             -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-15 \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_FLAGS="-G -lineinfo" \
+            -DCMAKE_CUDA_FLAGS="-lineinfo" \
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES=86 \
             -DGGML_CUDA_FA_ALL_QUANTS=ON \
@@ -75,17 +85,20 @@ jobs:
         if: github.ref == 'refs/heads/sw-main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           set -euo pipefail
-          # Debug binary is the PRIMARY production binary right now —
-          # we're hunting a turbo3/turbo4 GPU lockup and need device
-          # debug info every run so compute-sanitizer can attribute
-          # the OOB to a source line. Release binary stays available
-          # at .release suffix for benchmark comparisons.
+          # Primary = DEBUG (now built without `-G` — only `-lineinfo`).
+          # That keeps the register footprint within sm_86 limits so
+          # the binary actually serves traffic, while compute-sanitizer
+          # can still attribute OOB / races to source lines on demand.
+          # We're hunting a turbo3/turbo4 GPU lockup and need device
+          # lineinfo on every production run so we never have to
+          # re-deploy when sanitization is needed.
           install -m 755 "$DEBUG_BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
           install -m 755 "$DEBUG_BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo-debug
           install -m 755 "$BUILD_DIR/bin/llama-server"       /opt/llama-native/llama-server-turbo.release
           systemctl --user restart cxbr-gpu-svc.service
-          echo "✓ Deployed llama-server-turbo = DEBUG (production primary)"
+          echo "✓ Deployed llama-server-turbo = DEBUG-lineinfo (production primary)"
           echo "  Release binary preserved at /opt/llama-native/llama-server-turbo.release"
-          echo "  Sanitizer run: /usr/local/cuda-13.2/bin/compute-sanitizer \\"
-          echo "    --tool memcheck --launch-timeout 60 \\"
-          echo "    /opt/llama-native/llama-server-turbo-debug <args>"
+          echo "  Sanitizer run:"
+          echo "    /usr/local/cuda-13.2/bin/compute-sanitizer \\"
+          echo "      --tool memcheck --launch-timeout 60 \\"
+          echo "      /opt/llama-native/llama-server-turbo-debug <args>"
