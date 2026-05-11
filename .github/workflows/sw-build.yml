@@ -75,10 +75,17 @@ jobs:
         if: github.ref == 'refs/heads/sw-main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           set -euo pipefail
-          install -m 755 "$BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
+          # Debug binary is the PRIMARY production binary right now —
+          # we're hunting a turbo3/turbo4 GPU lockup and need device
+          # debug info every run so compute-sanitizer can attribute
+          # the OOB to a source line. Release binary stays available
+          # at .release suffix for benchmark comparisons.
+          install -m 755 "$DEBUG_BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo
           install -m 755 "$DEBUG_BUILD_DIR/bin/llama-server" /opt/llama-native/llama-server-turbo-debug
+          install -m 755 "$BUILD_DIR/bin/llama-server"       /opt/llama-native/llama-server-turbo.release
           systemctl --user restart cxbr-gpu-svc.service
-          echo "✓ Deployed llama-server-turbo (release) + llama-server-turbo-debug"
-          echo "  Run with sanitizer: /usr/local/cuda-13.2/bin/compute-sanitizer \\"
+          echo "✓ Deployed llama-server-turbo = DEBUG (production primary)"
+          echo "  Release binary preserved at /opt/llama-native/llama-server-turbo.release"
+          echo "  Sanitizer run: /usr/local/cuda-13.2/bin/compute-sanitizer \\"
           echo "    --tool memcheck --launch-timeout 60 \\"
           echo "    /opt/llama-native/llama-server-turbo-debug <args>"
